@@ -19,10 +19,7 @@
 #endif
 
 static HMODULE GetJvmDll() {
-  // Попробуем сначала получить handle уже загруженной jvm.dll
   HMODULE jvm_dll = GetModuleHandleW(L"jvm.dll");
-  
-  // Если не найдена, попробуем загрузить явно
   if (!jvm_dll) {
     jvm_dll = LoadLibraryW(L"jvm.dll");
     if (!jvm_dll) {
@@ -35,25 +32,18 @@ static HMODULE GetJvmDll() {
 typedef jint(JNICALL* GetCreatedJavaVMs)(JavaVM**, jsize, jsize*);
 
 static GetCreatedJavaVMs GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
-  // Основная попытка получить функцию
-  FARPROC get_created_java_vms_raw_proc =
-      GetProcAddress(jvm_dll, "JNI_GetCreatedJavaVMs");
+  FARPROC get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, "JNI_GetCreatedJavaVMs");
   
-  // Альтернативные варианты, если основной не сработал
   if (!get_created_java_vms_raw_proc) {
     get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, "_JNI_GetCreatedJavaVMs@12");
   }
   
   if (!get_created_java_vms_raw_proc) {
-    // Попробуем через ordinal
     get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, (LPCSTR)5);
   }
 
   if (!get_created_java_vms_raw_proc) {
-    Error(L"Can't get JNI_GetCreatedJavaVMs proc. Possible reasons:\n"
-          L"- Incompatible Java version\n"
-          L"- jvm.dll is corrupted\n"
-          L"- Architecture mismatch (64 vs 32 bit)");
+    Error(L"Can't get JNI_GetCreatedJavaVMs proc");
   }
   
   return reinterpret_cast<GetCreatedJavaVMs>(get_created_java_vms_raw_proc);
@@ -68,12 +58,12 @@ static JavaVM* GetJVM() {
   jint result = get_created_java_vms(jvms, 1, &n_vms);
 
   if (result != JNI_OK || n_vms == 0) {
-    Error(L"Can't get JVM. JNI_GetCreatedJavaVMs returned error code: " + std::to_wstring(result));
+    std::wstring errorMsg = L"Can't get JVM. JNI_GetCreatedJavaVMs returned error code: " + std::to_wstring(result);
+    Error(errorMsg.c_str());
   }
 
   return jvms[0];
 }
-
 static void GetJNIEnv(JavaVM* jvm, JNIEnv*& jni_env) {
   jni_env = nullptr;
   jvm->AttachCurrentThread(reinterpret_cast<void**>(&jni_env), nullptr);
