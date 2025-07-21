@@ -1,6 +1,5 @@
 #include <windows.h>
 #include <winuser.h>
-#include <tlhelp32.h> // Для работы с ToolHelp Snapshots
 
 #include "injector.h"
 #include "jvm/jni.h"
@@ -18,69 +17,60 @@
 #include "stub_classes/jar.h"
 #endif
 
-// Улучшенная функция поиска JNI_GetCreatedJavaVMs
+static HMODULE GetJvmDll() {
+  // Попробуем сначала получить handle уже загруженной jvm.dll
+  HMODULE jvm_dll = GetModuleHandleW(L"jvm.dll");
+  
+  // Если не найдена, попробуем загрузить явно
+  if (!jvm_dll) {
+    jvm_dll = LoadLibraryW(L"jvm.dll");
+    if (!jvm_dll) {
+      Error(L"Can't get jvm.dll handle");
+    }
+  }
+  return jvm_dll;
+}
+
 typedef jint(JNICALL* GetCreatedJavaVMs)(JavaVM**, jsize, jsize*);
 
-static GetCreatedJavaVMs GetGetCreatedJavaVMsProc() {
-    // Создаем снимок всех модулей процесса
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-    if (snapshot == INVALID_HANDLE_VALUE) {
-        Error(L"CreateToolhelp32Snapshot failed");
-    }
+static GetCreatedJavaVMs GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
+  // Явно укажем декорированное имя для 64-битных систем
+  const auto get_created_java_vms_raw_proc =
+      GetProcAddress(jvm_dll, "JNI_GetCreatedJavaVMs");
+  
+  // Альтернативная попытка для новых версий JVM
+  if (!get_created_java_vms_raw_proc) {
+    get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, "_JNI_GetCreatedJavaVMs@12");
+  }
+  
+  if (!get_created_java_vms_raw_proc) {
+    // Попробуем получить адрес через ordinal (может работать в некоторых версиях)
+    get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, (LPCSTR)5); // 5 - известный ordinal для этой функции
+  }
 
-    MODULEENTRY32W module_entry;
-    module_entry.dwSize = sizeof(module_entry);
-
-    if (!Module32FirstW(snapshot, &module_entry)) {
-        CloseHandle(snapshot);
-        Error(L"Module32First failed");
-    }
-
-    GetCreatedJavaVMs result_proc = nullptr;
-    bool found_jvm_dll = false;
-
-    do {
-        // Ищем все модули с именем jvm.dll (без учета регистра)
-        if (_wcsicmp(module_entry.szModule, L"jvm.dll") == 0) {
-            found_jvm_dll = true;
-            // Пытаемся получить адрес функции
-            auto proc = GetProcAddress(module_entry.hModule, "JNI_GetCreatedJavaVMs");
-            if (proc) {
-                result_proc = reinterpret_cast<GetCreatedJavaVMs>(proc);
-                break;
-            }
-        }
-    } while (Module32NextW(snapshot, &module_entry));
-
-    CloseHandle(snapshot);
-
-    // Обработка ошибок
-    if (!result_proc) {
-        if (found_jvm_dll) {
-            Error(L"Can't get JNI_GetCreatedJavaVMs proc from jvm.dll");
-        } else {
-            Error(L"Can't find jvm.dll in the process");
-        }
-    }
-
-    return result_proc;
+  if (!get_created_java_vms_raw_proc) {
+    Error(L"Can't get JNI_GetCreatedJavaVMs proc. Possible reasons:\n"
+          L"- Incompatible Java version\n"
+          L"- jvm.dll is corrupted\n"
+          L"- Architecture mismatch (64 vs 32 bit)");
+  }
+  
+  return reinterpret_cast<GetCreatedJavaVMs>(get_created_java_vms_raw_proc);
 }
 
 static JavaVM* GetJVM() {
-    // Получаем функцию через новый метод
-    const auto get_created_java_vms = GetGetCreatedJavaVMsProc();
+  const auto jvm_dll = GetJvmDll();
+  const auto get_created_java_vms = GetGetCreatedJavaVMsProc(jvm_dll);
 
-    JavaVM* jvms[1];
-    jsize n_vms = 1;
-    jsize actual_vms_count = 0;
+  JavaVM* jvms[1];
+  jsize n_vms = 0;
+  jint result = get_created_java_vms(jvms, 1, &n_vms);
 
-    // Получаем созданные JVM
-    jint result = get_created_java_vms(jvms, n_vms, &actual_vms_count);
-    if (result != JNI_OK || actual_vms_count == 0) {
-        Error(L"Can't get JVM");
-    }
+  if (result != JNI_OK || n_vms == 0) {
+    Error(L"Can't get JVM. JNI_GetCreatedJavaVMs returned error code: " + std::to_wstring(result));
+  }
 
-    return jvms[0];
+  return jvms[0];
 }
 
 static void GetJNIEnv(JavaVM* jvm, JNIEnv*& jni_env) {
