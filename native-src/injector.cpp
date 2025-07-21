@@ -19,7 +19,9 @@
 #include "stub_classes/jar.h"
 #endif
 
-// Альтернативный способ получения JVM через JNI Invocation API
+// Объявляем функцию GetJNIEnv перед использованием
+static void GetJNIEnv(JavaVM* jvm, JNIEnv** jni_env);
+
 static JavaVM* GetJVMThroughInvocationAPI() {
     JavaVM* jvm = nullptr;
     JNIEnv* env = nullptr;
@@ -27,7 +29,6 @@ static JavaVM* GetJVMThroughInvocationAPI() {
     JavaVMInitArgs vm_args;
     JavaVMOption options[1];
     
-    // Пустая опция, можно добавить нужные параметры JVM
     options[0].optionString = const_cast<char*>("-Djava.class.path=.");
     
     vm_args.version = JNI_VERSION_1_8;
@@ -44,7 +45,6 @@ static JavaVM* GetJVMThroughInvocationAPI() {
 }
 
 static HMODULE GetJvmDll() {
-    // Пытаемся найти jvm.dll в стандартных путях Java
     std::vector<std::wstring> paths = {
         L"jvm.dll",
         L"bin\\server\\jvm.dll",
@@ -60,10 +60,8 @@ static HMODULE GetJvmDll() {
         }
     }
 
-    // Если не нашли в стандартных путях, пробуем через GetModuleHandle
     HMODULE jvm_dll = GetModuleHandleW(L"jvm.dll");
     if (!jvm_dll) {
-        // Последняя попытка - загрузка из системного пути
         jvm_dll = LoadLibraryW(L"jvm.dll");
         if (!jvm_dll) {
             Error(L"Can't locate jvm.dll in standard paths");
@@ -76,11 +74,10 @@ static HMODULE GetJvmDll() {
 typedef jint(JNICALL* GetCreatedJavaVMs_t)(JavaVM**, jsize, jsize*);
 
 static GetCreatedJavaVMs_t GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
-    // Пробуем разные варианты имени функции
     const char* procNames[] = {
         "JNI_GetCreatedJavaVMs",
         "_JNI_GetCreatedJavaVMs@12",
-        reinterpret_cast<const char*>(5)  // Попробуем по ordinal
+        reinterpret_cast<const char*>(5)
     };
 
     for (const auto& name : procNames) {
@@ -90,12 +87,10 @@ static GetCreatedJavaVMs_t GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
         }
     }
 
-    // Если ничего не сработало, попробуем создать новую JVM
     return nullptr;
 }
 
 static JavaVM* GetJVM() {
-    // Сначала пробуем стандартный способ
     HMODULE jvm_dll = GetJvmDll();
     auto getCreatedJavaVMs = GetGetCreatedJavaVMsProc(jvm_dll);
     
@@ -109,7 +104,6 @@ static JavaVM* GetJVM() {
         }
     }
 
-    // Если стандартный способ не сработал, пробуем через Invocation API
     return GetJVMThroughInvocationAPI();
 }
 
@@ -180,17 +174,17 @@ static void CallInjector(JNIEnv* jni_env, jclass injector_class,
 }
 
 void RunInjector() {
-  ShowMessage(L"Starting");
+    ShowMessage(L"Starting");
 
-  const auto jvm = GetJVM();
+    const auto jvm = GetJVM();
 
-  JNIEnv* jni_env;
-  GetJNIEnv(jvm, jni_env);
+    JNIEnv* jni_env = nullptr;
+    GetJNIEnv(jvm, &jni_env);  // Передаем указатель на указатель
 
-  const auto injector_class = DefineOrGetInjector(jni_env);
-  const auto jar_classes_array = GetJarClassesArray(jni_env);
+    const auto injector_class = DefineOrGetInjector(jni_env);
+    const auto jar_classes_array = GetJarClassesArray(jni_env);
 
-  CallInjector(jni_env, injector_class, jar_classes_array);
+    CallInjector(jni_env, injector_class, jar_classes_array);
 
-  FreeLibraryAndExitThread(::global_dll_instance, 0);
+    FreeLibraryAndExitThread(::global_dll_instance, 0);
 }
