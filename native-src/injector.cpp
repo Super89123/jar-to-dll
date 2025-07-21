@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <winuser.h>
+#include <tlhelp32.h> // Для работы с ToolHelp Snapshots
 
 #include "injector.h"
 #include "jvm/jni.h"
@@ -17,38 +18,69 @@
 #include "stub_classes/jar.h"
 #endif
 
-static HMODULE GetJvmDll() {
-  const auto jvm_dll = GetModuleHandleW(L"jvm.dll");
-  if (!jvm_dll) {
-    Error(L"Can't get jvm.dll handle");
-  }
-  return jvm_dll;
-}
-
+// Улучшенная функция поиска JNI_GetCreatedJavaVMs
 typedef jint(JNICALL* GetCreatedJavaVMs)(JavaVM**, jsize, jsize*);
 
-static GetCreatedJavaVMs GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
-  const auto get_created_java_vms_raw_proc =
-      GetProcAddress(jvm_dll, "JNI_GetCreatedJavaVMs");
-  if (!get_created_java_vms_raw_proc) {
-    Error(L"Can't get JNI_GetCreatedJavaVMs proc");
-  }
-  return reinterpret_cast<GetCreatedJavaVMs>(get_created_java_vms_raw_proc);
+static GetCreatedJavaVMs GetGetCreatedJavaVMsProc() {
+    // Создаем снимок всех модулей процесса
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        Error(L"CreateToolhelp32Snapshot failed");
+    }
+
+    MODULEENTRY32W module_entry;
+    module_entry.dwSize = sizeof(module_entry);
+
+    if (!Module32FirstW(snapshot, &module_entry)) {
+        CloseHandle(snapshot);
+        Error(L"Module32First failed");
+    }
+
+    GetCreatedJavaVMs result_proc = nullptr;
+    bool found_jvm_dll = false;
+
+    do {
+        // Ищем все модули с именем jvm.dll (без учета регистра)
+        if (_wcsicmp(module_entry.szModule, L"jvm.dll") == 0) {
+            found_jvm_dll = true;
+            // Пытаемся получить адрес функции
+            auto proc = GetProcAddress(module_entry.hModule, "JNI_GetCreatedJavaVMs");
+            if (proc) {
+                result_proc = reinterpret_cast<GetCreatedJavaVMs>(proc);
+                break;
+            }
+        }
+    } while (Module32NextW(snapshot, &module_entry));
+
+    CloseHandle(snapshot);
+
+    // Обработка ошибок
+    if (!result_proc) {
+        if (found_jvm_dll) {
+            Error(L"Can't get JNI_GetCreatedJavaVMs proc from jvm.dll");
+        } else {
+            Error(L"Can't find jvm.dll in the process");
+        }
+    }
+
+    return result_proc;
 }
 
 static JavaVM* GetJVM() {
-  const auto jvm_dll = GetJvmDll();
-  const auto get_created_java_vms = GetGetCreatedJavaVMsProc(jvm_dll);
+    // Получаем функцию через новый метод
+    const auto get_created_java_vms = GetGetCreatedJavaVMsProc();
 
-  JavaVM* jvms[1];
-  jsize n_vms = 1;
-  get_created_java_vms(jvms, n_vms, &n_vms);
+    JavaVM* jvms[1];
+    jsize n_vms = 1;
+    jsize actual_vms_count = 0;
 
-  if (n_vms == 0) {
-    Error(L"Can't get JVM");
-  }
+    // Получаем созданные JVM
+    jint result = get_created_java_vms(jvms, n_vms, &actual_vms_count);
+    if (result != JNI_OK || actual_vms_count == 0) {
+        Error(L"Can't get JVM");
+    }
 
-  return jvms[0];
+    return jvms[0];
 }
 
 static void GetJNIEnv(JavaVM* jvm, JNIEnv*& jni_env) {
