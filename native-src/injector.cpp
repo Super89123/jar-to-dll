@@ -2,7 +2,7 @@
 #include <winuser.h>
 #include <string>
 #include <vector>
-#include <jvm/jni.h>
+#include "jvm/jni.h"
 
 #include "injector.h"
 #include "utils.h"
