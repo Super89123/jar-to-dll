@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <winuser.h>
 #include <string>
+#include <vector>
 
 #include "injector.h"
 #include "jvm/jni.h"
@@ -18,60 +19,111 @@
 #include "stub_classes/jar.h"
 #endif
 
-static HMODULE GetJvmDll() {
-  HMODULE jvm_dll = GetModuleHandleW(L"jvm.dll");
-  if (!jvm_dll) {
-    jvm_dll = LoadLibraryW(L"jvm.dll");
-    if (!jvm_dll) {
-      Error(L"Can't get jvm.dll handle");
+// Альтернативный способ получения JVM через JNI Invocation API
+static JavaVM* GetJVMThroughInvocationAPI() {
+    JavaVM* jvm = nullptr;
+    JNIEnv* env = nullptr;
+    
+    JavaVMInitArgs vm_args;
+    JavaVMOption options[1];
+    
+    // Пустая опция, можно добавить нужные параметры JVM
+    options[0].optionString = const_cast<char*>("-Djava.class.path=.");
+    
+    vm_args.version = JNI_VERSION_1_8;
+    vm_args.nOptions = 1;
+    vm_args.options = options;
+    vm_args.ignoreUnrecognized = JNI_TRUE;
+    
+    jint res = JNI_CreateJavaVM(&jvm, (void**)&env, &vm_args);
+    if (res != JNI_OK || !jvm) {
+        Error(L"Failed to create JVM through Invocation API");
     }
-  }
-  return jvm_dll;
+    
+    return jvm;
 }
 
-typedef jint(JNICALL* GetCreatedJavaVMs)(JavaVM**, jsize, jsize*);
+static HMODULE GetJvmDll() {
+    // Пытаемся найти jvm.dll в стандартных путях Java
+    std::vector<std::wstring> paths = {
+        L"jvm.dll",
+        L"bin\\server\\jvm.dll",
+        L"bin\\client\\jvm.dll",
+        L"jre\\bin\\server\\jvm.dll",
+        L"jre\\bin\\client\\jvm.dll"
+    };
 
-static GetCreatedJavaVMs GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
-  FARPROC get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, "JNI_GetCreatedJavaVMs");
-  
-  if (!get_created_java_vms_raw_proc) {
-    get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, "_JNI_GetCreatedJavaVMs@12");
-  }
-  
-  if (!get_created_java_vms_raw_proc) {
-    get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, (LPCSTR)5);
-  }
+    for (const auto& path : paths) {
+        HMODULE jvm_dll = LoadLibraryW(path.c_str());
+        if (jvm_dll) {
+            return jvm_dll;
+        }
+    }
 
-  if (!get_created_java_vms_raw_proc) {
-    Error(L"Can't get JNI_GetCreatedJavaVMs proc");
-  }
-  
-  return reinterpret_cast<GetCreatedJavaVMs>(get_created_java_vms_raw_proc);
+    // Если не нашли в стандартных путях, пробуем через GetModuleHandle
+    HMODULE jvm_dll = GetModuleHandleW(L"jvm.dll");
+    if (!jvm_dll) {
+        // Последняя попытка - загрузка из системного пути
+        jvm_dll = LoadLibraryW(L"jvm.dll");
+        if (!jvm_dll) {
+            Error(L"Can't locate jvm.dll in standard paths");
+        }
+    }
+    
+    return jvm_dll;
+}
+
+typedef jint(JNICALL* GetCreatedJavaVMs_t)(JavaVM**, jsize, jsize*);
+
+static GetCreatedJavaVMs_t GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
+    // Пробуем разные варианты имени функции
+    const char* procNames[] = {
+        "JNI_GetCreatedJavaVMs",
+        "_JNI_GetCreatedJavaVMs@12",
+        reinterpret_cast<const char*>(5)  // Попробуем по ordinal
+    };
+
+    for (const auto& name : procNames) {
+        FARPROC proc = GetProcAddress(jvm_dll, name);
+        if (proc) {
+            return reinterpret_cast<GetCreatedJavaVMs_t>(proc);
+        }
+    }
+
+    // Если ничего не сработало, попробуем создать новую JVM
+    return nullptr;
 }
 
 static JavaVM* GetJVM() {
-  const auto jvm_dll = GetJvmDll();
-  const auto get_created_java_vms = GetGetCreatedJavaVMsProc(jvm_dll);
+    // Сначала пробуем стандартный способ
+    HMODULE jvm_dll = GetJvmDll();
+    auto getCreatedJavaVMs = GetGetCreatedJavaVMsProc(jvm_dll);
+    
+    if (getCreatedJavaVMs) {
+        JavaVM* jvms[1];
+        jsize n_vms = 0;
+        jint result = getCreatedJavaVMs(jvms, 1, &n_vms);
 
-  JavaVM* jvms[1];
-  jsize n_vms = 0;
-  jint result = get_created_java_vms(jvms, 1, &n_vms);
+        if (result == JNI_OK && n_vms > 0) {
+            return jvms[0];
+        }
+    }
 
-  if (result != JNI_OK || n_vms == 0) {
-    std::wstring errorMsg = L"Can't get JVM. JNI_GetCreatedJavaVMs returned error code: " + std::to_wstring(result);
-    Error(errorMsg.c_str());
-  }
-
-  return jvms[0];
+    // Если стандартный способ не сработал, пробуем через Invocation API
+    return GetJVMThroughInvocationAPI();
 }
-static void GetJNIEnv(JavaVM* jvm, JNIEnv*& jni_env) {
-  jni_env = nullptr;
-  jvm->AttachCurrentThread(reinterpret_cast<void**>(&jni_env), nullptr);
-  jvm->GetEnv(reinterpret_cast<void**>(&jni_env), JNI_VERSION_1_8);
 
-  if (!jni_env) {
-    Error(L"Can't get JNIEnv");
-  }
+static void GetJNIEnv(JavaVM* jvm, JNIEnv** jni_env) {
+    *jni_env = nullptr;
+    jint result = jvm->GetEnv((void**)jni_env, JNI_VERSION_1_8);
+    
+    if (result == JNI_EDETACHED) {
+        result = jvm->AttachCurrentThread((void**)jni_env, nullptr);
+    }
+    
+    if (result != JNI_OK || !*jni_env) {
+        Error(L"Can't get JNIEnv");
+    }
 }
 
 static jclass DefineOrGetInjector(JNIEnv* jni_env) {
