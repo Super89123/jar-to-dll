@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <winuser.h>
+#include <string>
 
 #include "injector.h"
 #include "jvm/jni.h"
@@ -34,18 +35,18 @@ static HMODULE GetJvmDll() {
 typedef jint(JNICALL* GetCreatedJavaVMs)(JavaVM**, jsize, jsize*);
 
 static GetCreatedJavaVMs GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
-  // Явно укажем декорированное имя для 64-битных систем
-  const auto get_created_java_vms_raw_proc =
+  // Основная попытка получить функцию
+  FARPROC get_created_java_vms_raw_proc =
       GetProcAddress(jvm_dll, "JNI_GetCreatedJavaVMs");
   
-  // Альтернативная попытка для новых версий JVM
+  // Альтернативные варианты, если основной не сработал
   if (!get_created_java_vms_raw_proc) {
     get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, "_JNI_GetCreatedJavaVMs@12");
   }
   
   if (!get_created_java_vms_raw_proc) {
-    // Попробуем получить адрес через ordinal (может работать в некоторых версиях)
-    get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, (LPCSTR)5); // 5 - известный ordinal для этой функции
+    // Попробуем через ordinal
+    get_created_java_vms_raw_proc = GetProcAddress(jvm_dll, (LPCSTR)5);
   }
 
   if (!get_created_java_vms_raw_proc) {
