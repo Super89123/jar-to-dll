@@ -36,14 +36,22 @@ static JavaVM* GetJVMThroughInvocationAPI() {
     vm_args.options = options;
     vm_args.ignoreUnrecognized = JNI_TRUE;
     
-    jint res = JNI_CreateJavaVM(&jvm, (void**)&env, &vm_args);
+    // Используем явную загрузку jvm.dll для вызова JNI_CreateJavaVM
+    HMODULE jvm_dll = GetJvmDll();
+    typedef jint (JNICALL *CreateJavaVM_t)(JavaVM**, void**, void*);
+    CreateJavaVM_t createJavaVM = (CreateJavaVM_t)GetProcAddress(jvm_dll, "JNI_CreateJavaVM");
+    
+    if (!createJavaVM) {
+        Error(L"Failed to find JNI_CreateJavaVM in jvm.dll");
+    }
+    
+    jint res = createJavaVM(&jvm, (void**)&env, &vm_args);
     if (res != JNI_OK || !jvm) {
         Error(L"Failed to create JVM through Invocation API");
     }
     
     return jvm;
 }
-
 static HMODULE GetJvmDll() {
     std::vector<std::wstring> paths = {
         L"jvm.dll",
@@ -176,10 +184,31 @@ static void CallInjector(JNIEnv* jni_env, jclass injector_class,
 void RunInjector() {
     ShowMessage(L"Starting");
 
-    const auto jvm = GetJVM();
-
+    // Пробуем получить существующую JVM
+    HMODULE jvm_dll = GetJvmDll();
+    auto getCreatedJavaVMs = GetGetCreatedJavaVMsProc(jvm_dll);
+    
+    JavaVM* jvm = nullptr;
     JNIEnv* jni_env = nullptr;
-    GetJNIEnv(jvm, &jni_env);  // Передаем указатель на указатель
+    
+    if (getCreatedJavaVMs) {
+        JavaVM* jvms[1];
+        jsize n_vms = 0;
+        if (getCreatedJavaVMs(jvms, 1, &n_vms) == JNI_OK && n_vms > 0) {
+            jvm = jvms[0];
+            GetJNIEnv(jvm, &jni_env);
+        }
+    }
+    
+    // Если не нашли существующую JVM, создаем новую
+    if (!jvm) {
+        jvm = GetJVMThroughInvocationAPI();
+        GetJNIEnv(jvm, &jni_env);
+    }
+    
+    if (!jni_env) {
+        Error(L"Failed to obtain JNIEnv");
+    }
 
     const auto injector_class = DefineOrGetInjector(jni_env);
     const auto jar_classes_array = GetJarClassesArray(jni_env);
