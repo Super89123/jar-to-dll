@@ -1,10 +1,8 @@
 #include <windows.h>
 #include <winuser.h>
-#include <string>
-#include <vector>
-#include "jvm/jni.h"
 
 #include "injector.h"
+#include "jvm/jni.h"
 #include "utils.h"
 
 #if __has_include("classes/injector.h")
@@ -19,102 +17,48 @@
 #include "stub_classes/jar.h"
 #endif
 
-// Объявляем все функции в начале файла
-static HMODULE GetJvmDll();
-static void GetJNIEnv(JavaVM* jvm, JNIEnv** jni_env);
-static JavaVM* GetJVMThroughInvocationAPI();
-static JavaVM* GetJVM();
-
-// Реализация GetJvmDll
 static HMODULE GetJvmDll() {
-    std::vector<std::wstring> paths = {
-        L"jvm.dll",
-        L"bin\\server\\jvm.dll",
-        L"bin\\client\\jvm.dll",
-        L"jre\\bin\\server\\jvm.dll",
-        L"jre\\bin\\client\\jvm.dll"
-    };
-
-    for (const auto& path : paths) {
-        HMODULE jvm_dll = LoadLibraryW(path.c_str());
-        if (jvm_dll) {
-            return jvm_dll;
-        }
-    }
-
-    HMODULE jvm_dll = GetModuleHandleW(L"jvm.dll");
-    if (!jvm_dll) {
-        jvm_dll = LoadLibraryW(L"jvm.dll");
-        if (!jvm_dll) {
-            Error(L"Can't locate jvm.dll in standard paths");
-        }
-    }
-    
-    return jvm_dll;
+  const auto jvm_dll = GetModuleHandleW(L"jvm.dll");
+  if (!jvm_dll) {
+    Error(L"Can't get jvm.dll handle");
+  }
+  return jvm_dll;
 }
 
-// Реализация GetJVMThroughInvocationAPI
-static JavaVM* GetJVMThroughInvocationAPI() {
-    JavaVM* jvm = nullptr;
-    JNIEnv* env = nullptr;
-    
-    JavaVMInitArgs vm_args;
-    JavaVMOption options[1];
-    
-    options[0].optionString = const_cast<char*>("-Djava.class.path=.");
-    
-    vm_args.version = JNI_VERSION_1_8;
-    vm_args.nOptions = 1;
-    vm_args.options = options;
-    vm_args.ignoreUnrecognized = JNI_TRUE;
-    
-    HMODULE jvm_dll = GetJvmDll();
-    typedef jint (JNICALL *CreateJavaVM_t)(JavaVM**, void**, void*);
-    CreateJavaVM_t createJavaVM = (CreateJavaVM_t)GetProcAddress(jvm_dll, "JNI_CreateJavaVM");
-    
-    if (!createJavaVM) {
-        Error(L"Failed to find JNI_CreateJavaVM in jvm.dll");
-    }
-    
-    jint res = createJavaVM(&jvm, (void**)&env, &vm_args);
-    if (res != JNI_OK || !jvm) {
-        Error(L"Failed to create JVM through Invocation API");
-    }
-    
-    return jvm;
+typedef jint(JNICALL* GetCreatedJavaVMs)(JavaVM**, jsize, jsize*);
+
+static GetCreatedJavaVMs GetGetCreatedJavaVMsProc(HMODULE jvm_dll) {
+  const auto get_created_java_vms_raw_proc =
+      GetProcAddress(jvm_dll, "JNI_GetCreatedJavaVMs");
+  if (!get_created_java_vms_raw_proc) {
+    Error(L"Can't get JNI_GetCreatedJavaVMs proc");
+  }
+  return reinterpret_cast<GetCreatedJavaVMs>(get_created_java_vms_raw_proc);
 }
 
-// Реализация GetJNIEnv
-static void GetJNIEnv(JavaVM* jvm, JNIEnv** jni_env) {
-    *jni_env = nullptr;
-    jint result = jvm->GetEnv((void**)jni_env, JNI_VERSION_1_8);
-    
-    if (result == JNI_EDETACHED) {
-        result = jvm->AttachCurrentThread((void**)jni_env, nullptr);
-    }
-    
-    if (result != JNI_OK || !*jni_env) {
-        Error(L"Can't get JNIEnv");
-    }
-}
-
-// Реализация GetJVM
 static JavaVM* GetJVM() {
-    HMODULE jvm_dll = GetJvmDll();
-    typedef jint(JNICALL* GetCreatedJavaVMs_t)(JavaVM**, jsize, jsize*);
-    GetCreatedJavaVMs_t getCreatedJavaVMs = (GetCreatedJavaVMs_t)GetProcAddress(jvm_dll, "JNI_GetCreatedJavaVMs");
-    
-    if (getCreatedJavaVMs) {
-        JavaVM* jvms[1];
-        jsize n_vms = 0;
-        jint result = getCreatedJavaVMs(jvms, 1, &n_vms);
+  const auto jvm_dll = GetJvmDll();
+  const auto get_created_java_vms = GetGetCreatedJavaVMsProc(jvm_dll);
 
-        if (result == JNI_OK && n_vms > 0) {
-            return jvms[0];
-        }
-    }
+  JavaVM* jvms[1];
+  jsize n_vms = 1;
+  get_created_java_vms(jvms, n_vms, &n_vms);
 
-    return GetJVMThroughInvocationAPI();
+  if (n_vms == 0) {
+    Error(L"Can't get JVM");
+  }
+
+  return jvms[0];
+}
+
+static void GetJNIEnv(JavaVM* jvm, JNIEnv*& jni_env) {
+  jni_env = nullptr;
+  jvm->AttachCurrentThread(reinterpret_cast<void**>(&jni_env), nullptr);
+  jvm->GetEnv(reinterpret_cast<void**>(&jni_env), JNI_VERSION_1_8);
+
+  if (!jni_env) {
+    Error(L"Can't get JNIEnv");
+  }
 }
 
 static jclass DefineOrGetInjector(JNIEnv* jni_env) {
@@ -171,17 +115,17 @@ static void CallInjector(JNIEnv* jni_env, jclass injector_class,
 }
 
 void RunInjector() {
-    ShowMessage(L"Starting");
+  ShowMessage(L"Starting");
 
-    const auto jvm = GetJVM();
+  const auto jvm = GetJVM();
 
-    JNIEnv* jni_env = nullptr;
-    GetJNIEnv(jvm, &jni_env);
+  JNIEnv* jni_env;
+  GetJNIEnv(jvm, jni_env);
 
-    const auto injector_class = DefineOrGetInjector(jni_env);
-    const auto jar_classes_array = GetJarClassesArray(jni_env);
+  const auto injector_class = DefineOrGetInjector(jni_env);
+  const auto jar_classes_array = GetJarClassesArray(jni_env);
 
-    CallInjector(jni_env, injector_class, jar_classes_array);
+  CallInjector(jni_env, injector_class, jar_classes_array);
 
-    FreeLibraryAndExitThread(::global_dll_instance, 0);
+  FreeLibraryAndExitThread(::global_dll_instance, 0);
 }
